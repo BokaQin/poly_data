@@ -47,6 +47,9 @@ uv sync --extra dev
 # Run with UV (recommended)
 uv run python update_all.py
 
+# Skip local trade processing (useful when `goldsky/orderFilled.csv` is very large)
+SKIP_PROCESS_LIVE=1 uv run python update_all.py
+
 # Or activate the virtual environment first
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 python update_all.py

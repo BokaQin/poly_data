@@ -113,6 +113,7 @@ def scrape(at_once=1000):
     print(f"Saving columns: {COLUMNS_TO_SAVE}")
 
     while True:
+        query_was_sticky = sticky_timestamp is not None
         # Build the where clause based on cursor state
         if sticky_timestamp is not None:
             # We're in sticky mode: stay at this timestamp and paginate by id
@@ -218,7 +219,10 @@ def scrape(at_once=1000):
         # Save cursor state for efficient resume (no duplicates on restart)
         save_cursor(last_timestamp, last_id, sticky_timestamp)
 
-        if len(df) < at_once and sticky_timestamp is None:
+        # Only stop early when we're in normal mode and the server returned fewer than a full batch,
+        # which usually indicates we've reached the end. In sticky mode, it's common to get a short
+        # page and then continue on to the next timestamp.
+        if (not query_was_sticky) and (len(df) < at_once) and (sticky_timestamp is None):
             break
 
     # Clear cursor file on successful completion

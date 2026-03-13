@@ -14,6 +14,10 @@ import pandas as pd
 
 def get_processed_df(df):
     markets_df = get_markets()
+    if markets_df.height == 0:
+        raise FileNotFoundError(
+            "No market files found. Ensure `markets.csv` exists (run update_markets() first, or extract a data snapshot)."
+        )
     markets_df = markets_df.rename({'id': 'market_id'})
 
     # 1) Make markets long: (market_id, side, asset_id) where side ∈ {"token1", "token2"}
@@ -108,49 +112,71 @@ def process_live():
     print("🔄 Processing Live Trades")
     print("=" * 60)
 
-    last_processed = {}
+    last_processed = None
 
     if os.path.exists(processed_file):
         print(f"✓ Found existing processed file: {processed_file}")
         result = subprocess.run(['tail', '-n', '1', processed_file], capture_output=True, text=True)
         last_line = result.stdout.strip()
-        splitted = last_line.split(',')
+        splitted = last_line.split(',') if last_line else []
 
-        last_processed['timestamp'] = pd.to_datetime(splitted[0])
-        last_processed['transactionHash'] = splitted[-1]
-        last_processed['maker'] = splitted[2]
-        last_processed['taker'] = splitted[3]
+        if not splitted or (splitted[0] == "timestamp"):
+            print("⚠ Processed file exists but has no data rows - processing from beginning")
+        else:
+            last_processed = {
+                'timestamp': pd.to_datetime(splitted[0]),
+                'transactionHash': splitted[-1],
+                'maker': splitted[2],
+                'taker': splitted[3],
+            }
         
-        print(f"📍 Resuming from: {last_processed['timestamp']}")
-        print(f"   Last hash: {last_processed['transactionHash'][:16]}...")
+            print(f"📍 Resuming from: {last_processed['timestamp']}")
+            print(f"   Last hash: {last_processed['transactionHash'][:16]}...")
     else:
         print("⚠ No existing processed file found - processing from beginning")
 
-    print(f"\n📂 Reading: goldsky/orderFilled.csv")
+    input_file = "goldsky/orderFilled.csv"
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"Missing input file: {input_file}. Run update_goldsky() first or extract a data snapshot.")
+
+    print(f"\n📂 Reading: {input_file}")
 
     schema_overrides = {
         "takerAssetId": pl.Utf8,
         "makerAssetId": pl.Utf8,
     }
 
-    df = pl.scan_csv("goldsky/orderFilled.csv", schema_overrides=schema_overrides).collect(streaming=True)
+    df = pl.scan_csv(input_file, schema_overrides=schema_overrides).collect(streaming=True)
     df = df.with_columns(
         pl.from_epoch(pl.col('timestamp'), time_unit='s').alias('timestamp')
     )
 
     print(f"✓ Loaded {len(df):,} rows")
 
-    df = df.with_row_index()
+    if last_processed is None:
+        df_process = df
+    else:
+        df = df.with_row_index("row_index")
 
-    same_timestamp = df.filter(pl.col('timestamp') == last_processed['timestamp'])
-    same_timestamp = same_timestamp.filter(
-        (pl.col("transactionHash") == last_processed['transactionHash']) & (pl.col("maker") == last_processed['maker']) & (pl.col("taker") == last_processed['taker'])
-    )
+        last_row_match = df.filter(
+            (pl.col('timestamp') == last_processed['timestamp'])
+            & (pl.col("transactionHash") == last_processed['transactionHash'])
+            & (pl.col("maker") == last_processed['maker'])
+            & (pl.col("taker") == last_processed['taker'])
+        )
 
-    df_process = df.filter(pl.col('index') > same_timestamp.row(0)[0])
-    df_process = df_process.drop('index')
+        if last_row_match.height == 0:
+            print("⚠️  Could not locate last processed trade in orderFilled.csv; processing from beginning (may create duplicates).")
+            df_process = df.drop('row_index')
+        else:
+            last_row_index = int(last_row_match.get_column("row_index")[0])
+            df_process = df.filter(pl.col('row_index') > last_row_index).drop('row_index')
 
     print(f"⚙️  Processing {len(df_process):,} new rows...")
+
+    if df_process.height == 0:
+        print("✓ No new rows to process")
+        return
 
     new_df = get_processed_df(df_process)
     
